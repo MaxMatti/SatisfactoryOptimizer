@@ -405,7 +405,7 @@ target_items = {
 only_in_machines = True
 
 def main(argv):
-	with open("data.json") as infile:
+	with open("data/data.json") as infile:
 		obj = json.loads(infile.read())
 	lp_solver = subprocess.Popen("lp_solve", stdin=subprocess.PIPE, stdout=subprocess.PIPE)
 	lp_solver.stdin.write(("min: score;\nscore = resource_score + building_score;\n").encode("utf-8"))
