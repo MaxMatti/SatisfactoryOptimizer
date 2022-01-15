@@ -556,8 +556,8 @@ def build_recipes(obj):
 	for recipe_name, recipe in obj["recipes"].items():
 		if only_in_machines and not recipe["inMachine"]:
 			continue  # Skip recipes which cannot be build in machines
-		if {ingredient["item"] for ingredient in recipe["ingredients"]}.intersection(target_items.keys()):
-			continue  # Skip recipes which consume our target item
+		if recipe_name == "Recipe_SinkPoint_Desc_ResourceSinkCoupon_C":
+			continue  # Skip "broken" recipe
 		for product in recipe["products"]:
 			recipes = produced_by.setdefault(product["item"], list())
 			recipes.append(Recipe(recipe_name, 60 * product["amount"] / recipe["time"]))
