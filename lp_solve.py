@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import collections
 import dataclasses
 import json
 import math
@@ -430,34 +431,55 @@ def main():
 
 	output = lp_solver.stdout.read().split("\n")
 	if "Actual values of the variables:" not in output:
-		print("Error occured. Original output:")
-		print("\n".join(output))
-		return
-	result = []
+		sys.exit("Error occured. Original output:\n" + "\n".join(output))
+
+	recipes = {}
+	items = {}
 	for line in output[output.index("Actual values of the variables:")+1:-1]:
-		if not line.endswith(" 0"):
-			result.append(list(filter(None, line.split(" "))))
-	used_keys = set([item[0] for item in result])
-	for i in range(len(result)):
-		if result[i][0].startswith("Recipe_"):
-			if result[i][0] in obj["recipes"]:
-				result[i][1] = str(float(result[i][1]) * obj["recipes"][result[i][0]]["time"])
-				result[i].append("using")
-				ingredients = []
-				for ingredient in obj["recipes"][result[i][0]]["ingredients"]:
-					ingredients += [str(ingredient["amount"] * float(result[i][1])), ingredient["item"], "and"]
-				result[i] += ingredients[:-1]
-			else:
-				result[i][1] += " (unknown time)"
-		elif result[i][0].startswith("Desc_"):
-			if result[i][0] in produced_in:
-				result[i].append("produced in")
-				result[i] += [item for item in produced_in[result[i][0]] if item in used_keys]
-	print("\n".join([" ".join(line) for line in result]))
-	print("main items:")
-	print("\n".join([" ".join(line) for line in result if line[0].startswith("Recipe_SinkPoint_")]))
-	print("inputs:")
-	print("\n".join([" ".join(line) for line in result if line[0] in obj["resources"]]))
+		if line.endswith(" 0"):
+			continue
+		columns = list(filter(None, line.split(" ")))
+		assert len(columns) == 2
+		variable = columns[0]
+		value = float(columns[1])
+		if "@" in variable:
+			continue  # ignore building counter
+		if variable.startswith("Recipe_"):
+			assert variable in obj["recipes"]
+			recipes[variable] = value
+		elif variable.startswith("Desc_"):
+			assert variable in obj["items"]
+			items[variable] = value
+
+	max_item_name_length = 8
+	for item_name, value in items.items():
+		max_item_name_length = max(max_item_name_length, len(obj["items"][item_name]["name"]))
+	sorted_recipes = sort_recipes(recipes, obj)
+
+	print("Resources:\n")
+	for item_name, value in items.items():
+		if item_name not in obj["resources"]:
+			continue
+		item = obj["items"][item_name]
+		print(f"  {item['name']:{max_item_name_length}} : {value}")
+
+	print("\nFactories:")
+	for recipe_name, value in sorted_recipes.items():
+		recipe = obj["recipes"][recipe_name]
+		building = obj["buildings"][recipe["producedIn"][0]]
+		print()
+		print(f"  {recipe['name']} ({math.ceil(value)} x)")
+		print(f"    Building {building['name']}")
+		print(f"    Input")
+		for ingredient in recipe["ingredients"]:
+			name = obj["items"][ingredient["item"]]["name"]
+			rate = 60 * ingredient["amount"] / recipe["time"]
+			print(f"      {name:{max_item_name_length}} {value * rate:12.2f} (at most {math.floor(780 / rate)} factories per belt)")
+		print(f"    Output")
+		for product in recipe["products"]:
+			name = obj["items"][product["item"]]["name"]
+			rate = 60 * product["amount"] / recipe["time"]
+			print(f"      {name:{max_item_name_length}} {value * rate:12.2f} (at most {math.floor(780 / rate)} factories per belt)")
 
 
 def scan_buildings(obj):
@@ -548,6 +570,28 @@ def build_declarations(buildings):
 	result = "\n// declarations\n"
 	result += f"int {', '.join(buildings.keys())};\n"
 	return result
+
+
+def sort_recipes(recipes, obj):
+	out = collections.OrderedDict()
+	seen = set()
+	recipes_by_product = {}
+	for recipe_name in recipes.keys():
+		for product in obj["recipes"][recipe_name]["products"]:
+			recipes_by_product.setdefault(product["item"], list()).append(recipe_name)
+
+	def add_recursively(recipe_name):
+		if recipe_name in seen:
+			return  # Avoid endless recursion
+		seen.add(recipe_name)
+		for ingredient in obj["recipes"][recipe_name]["ingredients"]:
+			for ingredient_recipe_name in recipes_by_product.get(ingredient["item"], []):
+				add_recursively(ingredient_recipe_name)
+		out[recipe_name] = recipes[recipe_name]
+
+	for recipe_name in recipes.keys():
+		add_recursively(recipe_name)
+	return out
 
 
 if __name__ == '__main__':
