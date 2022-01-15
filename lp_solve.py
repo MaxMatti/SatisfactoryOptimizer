@@ -413,15 +413,12 @@ def main():
 		assert set(obj["resources"].keys()) == {*resource_scores, "Desc_Water_C"}
 		assert obj["resources"].keys() <= obj["items"].keys()
 		assert obj["buildings"].keys().isdisjoint(obj["items"].keys())
-	buildings = scan_buildings(obj)
 	lp_solver = subprocess.Popen(["lp_solve", "-s6"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
 	stdin = lp_solver.stdin
-	stdin.write(f"min: {build_resource_score(obj)} + {build_building_score(obj, buildings)};\n")
+	stdin.write(f"min: {build_resource_score(obj)} + {build_building_score(obj)};\n")
 	stdin.write(build_resources())
 	stdin.write(build_recipes(obj))
 	stdin.write(build_target())
-	stdin.write(build_buildings(obj, buildings))
-	stdin.write(build_declarations(buildings))
 	lp_solver.stdin.close()
 	lp_solver.wait()
 
@@ -444,13 +441,12 @@ def main():
 			if value != 0:
 				items[variable[4:]] = value
 			max_name_length = max(max_name_length, len(obj["items"][variable[4:]]["name"]))
-		elif "@" in variable and value != 0:
-			recipe_name, building_name = variable.split("@")
+		elif variable.startswith("Recipe_") and value != 0:
+			assert variable in obj["recipes"], variable
+			building_name = obj["recipes"][variable]["producedIn"][0]
 			buildings.setdefault(building_name, 0)
 			buildings[building_name] += math.ceil(value)
 			max_name_length = max(max_name_length, len(obj["buildings"][building_name]["name"]))
-		elif variable.startswith("Recipe_") and value != 0:
-			assert variable in obj["recipes"]
 			recipes[variable] = value
 		elif variable.startswith("res#") and value != 0:
 			assert variable[4:] in obj["resources"]
@@ -496,18 +492,6 @@ def main():
 		print(f"  {item['name']:{max_name_length}}  :  {value:13,.2f}")
 
 
-def scan_buildings(obj):
-	buildings = {}
-	for recipe_name, recipe in obj["recipes"].items():
-		if only_in_machines and not recipe["inMachine"]:
-			continue  # Skip recipes which cannot be build in machines
-		assert len(recipe["producedIn"]) == 1
-		for building in recipe["producedIn"]:
-			assert building in obj["buildings"]
-			buildings[f"{recipe_name}@{building}"] = (recipe_name, building)
-	return buildings
-
-
 def build_resource_score(obj):
 	assert 0 not in resource_scores.values(), "math.lcm returns 0 when one value is 0"
 	multiplicator = math.lcm(*resource_scores.values())
@@ -518,11 +502,16 @@ def build_resource_score(obj):
 	return result[:-3]
 
 
-def build_building_score(obj, buildings):
+def build_building_score(obj):
 	building_score = ""
-	for building_name, (_, original_name) in buildings.items():
-		assert original_name in obj["buildings"]
-		building_score += str(building_scores[original_name]) + " " + building_name + " + "
+	for recipe_name, recipe in obj["recipes"].items():
+		if only_in_machines and not recipe["inMachine"]:
+			continue  # Skip recipes which cannot be build in machines
+		assert len(recipe["producedIn"]) == 1, repr(recipe["producedIn"])
+		building = recipe["producedIn"][0]
+		assert building in obj["buildings"], building
+		assert building in building_scores, building
+		building_score += str(building_scores[building]) + " " + recipe_name + " + "
 	return building_score[:-3]
 
 
@@ -574,24 +563,10 @@ def build_recipes(obj):
 	return result
 
 
-def build_buildings(obj, buildings):
-	result = "\n// buildings\n"
-	for building_name, (recipe_name, _) in buildings.items():
-		assert recipe_name in obj["recipes"]
-		result += f"{building_name} >= {recipe_name};\n"
-	return result
-
-
 def build_target():
 	result = "\n// targets\n"
 	for item, amount in target_items.items():
 		result += f"itm#{item} >= {str(amount)};\n"
-	return result
-
-
-def build_declarations(buildings):
-	result = "\n// declarations\n"
-	result += f"int {', '.join(buildings.keys())};\n"
 	return result
 
 
