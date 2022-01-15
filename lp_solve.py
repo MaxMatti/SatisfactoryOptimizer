@@ -417,6 +417,7 @@ def main():
 	lp_solver = subprocess.Popen(["lp_solve", "-s6"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
 	stdin = lp_solver.stdin
 	stdin.write(f"min: {build_resource_score(obj)} + {build_building_score(obj, buildings)};\n")
+	stdin.write(build_resources())
 	stdin.write(build_recipes(obj))
 	stdin.write(build_target())
 	stdin.write(build_buildings(obj, buildings))
@@ -433,53 +434,71 @@ def main():
 	if "Actual values of the variables:" not in output:
 		sys.exit("Error occured. Original output:\n" + "\n".join(output))
 
+	resources = {}
 	recipes = {}
 	items = {}
+	buildings = {}
+	max_name_length = 8
 	for line in output[output.index("Actual values of the variables:")+1:-1]:
-		if line.endswith(" 0"):
-			continue
 		columns = list(filter(None, line.split(" ")))
 		assert len(columns) == 2
 		variable = columns[0]
 		value = float(columns[1])
-		if "@" in variable:
-			continue  # ignore building counter
-		if variable.startswith("Recipe_"):
+		if variable.startswith("itm#"):
+			assert variable[4:] in obj["items"]
+			if value != 0:
+				items[variable[4:]] = value
+			max_name_length = max(max_name_length, len(obj["items"][variable[4:]]["name"]))
+		elif "@" in variable and value != 0:
+			recipe_name, building_name = variable.split("@")
+			buildings.setdefault(building_name, 0)
+			buildings[building_name] += math.ceil(value)
+			max_name_length = max(max_name_length, len(obj["buildings"][building_name]["name"]))
+		elif variable.startswith("Recipe_") and value != 0:
 			assert variable in obj["recipes"]
 			recipes[variable] = value
-		elif variable.startswith("Desc_"):
-			assert variable in obj["items"]
-			items[variable] = value
+		elif variable.startswith("res#") and value != 0:
+			assert variable[4:] in obj["resources"]
+			resources[variable[4:]] = value
+		elif value != 0:
+			print("WARN: Unknown variable: " + variable, file=sys.stderr)
 
-	max_item_name_length = 8
-	for item_name, value in items.items():
-		max_item_name_length = max(max_item_name_length, len(obj["items"][item_name]["name"]))
 	sorted_recipes = sort_recipes(recipes, obj)
 
 	print("Resources:\n")
-	for item_name, value in items.items():
-		if item_name not in obj["resources"]:
-			continue
-		item = obj["items"][item_name]
-		print(f"  {item['name']:{max_item_name_length}} : {value}")
+	for resource_name, value in resources.items():
+		assert resource_name in obj["resources"]
+		item = obj["items"][resource_name]
+		print(f"  {item['name']:{max_name_length}}  :  {value:13,.2f}")
 
-	print("\nFactories:")
+	print("\nFactories:\n")
 	for recipe_name, value in sorted_recipes.items():
 		recipe = obj["recipes"][recipe_name]
 		building = obj["buildings"][recipe["producedIn"][0]]
-		print()
 		print(f"  {recipe['name']} ({math.ceil(value)} x)")
 		print(f"    Building {building['name']}")
 		print(f"    Input")
 		for ingredient in recipe["ingredients"]:
 			name = obj["items"][ingredient["item"]]["name"]
 			rate = 60 * ingredient["amount"] / recipe["time"]
-			print(f"      {name:{max_item_name_length}} {value * rate:12.2f} (at most {math.floor(780 / rate)} factories per belt)")
+			print(f"      {name:{max_name_length}} {value * rate:13,.2f} (at most {math.floor(780 / rate):3} factories per belt)")
 		print(f"    Output")
 		for product in recipe["products"]:
 			name = obj["items"][product["item"]]["name"]
 			rate = 60 * product["amount"] / recipe["time"]
-			print(f"      {name:{max_item_name_length}} {value * rate:12.2f} (at most {math.floor(780 / rate)} factories per belt)")
+			print(f"      {name:{max_name_length}} {value * rate:13,.2f} (at most {math.floor(780 / rate):3} factories per belt)")
+		print()
+
+	print("Buildings:\n")
+	for building_name, value in buildings.items():
+		assert building_name in obj["buildings"]
+		print(f"  {obj['buildings'][building_name]['name']:{max_name_length}}  :  {value:4}")
+
+	print("\nOverall Output:\n")
+	for item_name, value in items.items():
+		assert item_name in obj["items"]
+		item = obj["items"][item_name]
+		print(f"  {item['name']:{max_name_length}}  :  {value:13,.2f}")
 
 
 def scan_buildings(obj):
@@ -500,7 +519,7 @@ def build_resource_score(obj):
 	result = ""
 	for resource_name in obj["resources"]:
 		score = 1 if resource_name == "Desc_Water_C" else (multiplicator // resource_scores[resource_name])
-		result += str(score) + " " + resource_name + " + "
+		result += str(score) + " res#" + resource_name + " + "
 	return result[:-3]
 
 
@@ -512,19 +531,24 @@ def build_building_score(obj, buildings):
 	return building_score[:-3]
 
 
+def build_resources():
+	result = "\n// resources\n"
+	for resource_name, limit in resource_scores.items():
+		result += f"res#{resource_name} <= {limit};\n"
+	return result
+
+
 def build_recipes(obj):
 	@dataclasses.dataclass(frozen=True)
 	class Recipe:
 		name: str
 		rate: float
 
-	def join(recipes, suffix=None):
+	def join(sep, recipes):
 		terms = []
-		if recipes is not None:
-			terms += [f"{recipe.rate} {recipe.name}" for recipe in recipes]
-		if suffix is not None:
-			terms += [str(suffix)]
-		return " + ".join(terms) if terms else "0"
+		for recipe in recipes:
+			terms.append(f"{sep}{recipe.rate} {recipe.name}")
+		return " ".join(terms) if terms else "0"
 
 	produced_by = {}
 	consumed_by = {}
@@ -545,8 +569,12 @@ def build_recipes(obj):
 	for item in consumed_by.keys() | produced_by.keys() | resource_scores.keys():
 		assert item in obj["items"]
 		assert item not in obj["buildings"]
-		result += f"{item} >= {join(consumed_by.get(item))};\n"
-		result += f"{item} <= {join(produced_by.get(item), resource_scores.get(item))};\n"
+		production = join('+', produced_by.get(item, list()))
+		consumption = join('-', consumed_by.get(item, list()))
+		if item in resource_scores:
+			result += f"itm#{item} = res#{item} {production} {consumption};\n"
+		else:
+			result += f"itm#{item} = {production} {consumption};\n"
 
 	return result
 
@@ -562,7 +590,7 @@ def build_buildings(obj, buildings):
 def build_target():
 	result = "\n// targets\n"
 	for item, amount in target_items.items():
-		result += f"{item} >= {str(amount)};\n"
+		result += f"itm#{item} >= {str(amount)};\n"
 	return result
 
 
