@@ -425,11 +425,6 @@ def main():
 	lp_solver.stdin.close()
 	lp_solver.wait()
 
-	produced_in = {}
-	for recipe_name, recipe in obj["recipes"].items():
-		for product in recipe["products"]:
-			produced_in.setdefault(product["item"], list()).append(recipe_name)
-
 	output = lp_solver.stdout.read().split("\n")
 	if "Actual values of the variables:" not in output:
 		sys.exit("Error occured. Original output:\n" + "\n".join(output))
