@@ -4,6 +4,7 @@ import collections
 import dataclasses
 import json
 import math
+import statistics
 import subprocess
 import sys
 
@@ -413,9 +414,9 @@ def main():
 		assert set(obj["resources"].keys()) == {*resource_scores, "Desc_Water_C"}
 		assert obj["resources"].keys() <= obj["items"].keys()
 		assert obj["buildings"].keys().isdisjoint(obj["items"].keys())
-	lp_solver = subprocess.Popen(["lp_solve", "-s6"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+	lp_solver = subprocess.Popen(["lp_solve"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
 	stdin = lp_solver.stdin
-	stdin.write(f"min: {build_resource_score(obj)} + {build_building_score(obj)};\n")
+	stdin.write(f"min: {build_resource_score(obj, 1_000)} + {build_building_score(obj, 1)};\n")
 	stdin.write(build_resources())
 	stdin.write(build_recipes(obj))
 	stdin.write(build_target())
@@ -492,17 +493,16 @@ def main():
 		print(f"  {item['name']:{max_name_length}}  :  {value:13,.2f}")
 
 
-def build_resource_score(obj):
-	assert 0 not in resource_scores.values(), "math.lcm returns 0 when one value is 0"
-	multiplicator = math.lcm(*resource_scores.values())
+def build_resource_score(obj, multiplier):
+	avg = statistics.mean(resource_scores.values())
 	result = ""
 	for resource_name in obj["resources"]:
-		score = 1 if resource_name == "Desc_Water_C" else (multiplicator // resource_scores[resource_name])
-		result += str(score) + " res#" + resource_name + " + "
-	return result[:-3]
+		score = 0 if resource_name == "Desc_Water_C" else (avg / resource_scores[resource_name])
+		result += f"+{multiplier * score} res#{resource_name}"
+	return result
 
 
-def build_building_score(obj):
+def build_building_score(obj, multiplier):
 	building_score = ""
 	for recipe_name, recipe in obj["recipes"].items():
 		if only_in_machines and not recipe["inMachine"]:
@@ -511,8 +511,8 @@ def build_building_score(obj):
 		building = recipe["producedIn"][0]
 		assert building in obj["buildings"], building
 		assert building in building_scores, building
-		building_score += str(building_scores[building]) + " " + recipe_name + " + "
-	return building_score[:-3]
+		building_score += f"+{multiplier * building_scores[building]} {recipe_name}"
+	return building_score
 
 
 def build_resources():
