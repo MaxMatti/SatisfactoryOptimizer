@@ -1,22 +1,25 @@
 #!/usr/bin/env python3
 
+import collections
+import dataclasses
 import json
 import math
+import statistics
 import subprocess
 import sys
 
 resource_scores = {
-	"Desc_OreIron_C": 70380,
-	"Desc_OreCopper_C": 28860,
-	"Desc_Stone_C": 52860,
-	"Desc_Coal_C": 30900,
-	"Desc_OreGold_C": 11040,
-	"Desc_LiquidOil_C": 11700,
-	"Desc_RawQuartz_C": 10500,
-	"Desc_Sulfur_C": 6840,
-	"Desc_OreBauxite_C": 9780,
-	"Desc_OreUranium_C": 2100,
-	"Desc_NitrogenGas_C": 12000
+	"Desc_OreIron_C": 70_380,
+	"Desc_OreCopper_C": 28_860,
+	"Desc_Stone_C": 52_860,
+	"Desc_Coal_C": 30_900,
+	"Desc_OreGold_C": 11_040,
+	"Desc_LiquidOil_C": 11_700,
+	"Desc_RawQuartz_C": 10_500,
+	"Desc_Sulfur_C": 6_840,
+	"Desc_OreBauxite_C": 9_780,
+	"Desc_OreUranium_C": 2_100,
+	"Desc_NitrogenGas_C": 12_000,
 }
 
 building_scores = {
@@ -399,101 +402,195 @@ building_scores = {
 }
 
 target_items = {
-	"Desc_ResourceSinkCoupon_C": 1000000000
+	"Desc_ResourceSinkCoupon_C": 10_000_000
 }
 
 only_in_machines = True
 
-def main(argv):
+
+def main():
 	with open("data/data.json") as infile:
 		obj = json.loads(infile.read())
-	lp_solver = subprocess.Popen("lp_solve", stdin=subprocess.PIPE, stdout=subprocess.PIPE)
-	lp_solver.stdin.write(("min: score;\nscore = resource_score + building_score;\n").encode("utf-8"))
-	resource_score = "resource_score = "
-	multiplicator = math.lcm(*resource_scores.values())
-	for resource_name in resource_scores:
-		lp_solver.stdin.write((resource_name + " <= " + str(resource_scores[resource_name]) + ";\n").encode("utf-8"))
-	resource_scores["Desc_Water_C"] = multiplicator
-	for resource_name in obj["resources"]:
-		resource_score += str(multiplicator // resource_scores[resource_name]) + " * " + resource_name + " + "
-	lp_solver.stdin.write((resource_score[:-3] + ";\n").encode("utf-8"))
-	building_score = "building_score = "
-	for building_name in obj["buildings"]:
-		building_score += str(building_scores[building_name]) + " * " + building_name + " + "
-	lp_solver.stdin.write((building_score[:-3] + ";\n").encode("utf-8"))
-	resources = {}
-	products = {}
-	produced_in = {}
-	for recipe_name in obj["recipes"]:
-		recipe = obj["recipes"][recipe_name]
-		for ingredient in recipe["ingredients"]:
-			if ingredient["item"] not in resources:
-				resources[ingredient["item"]] = []
-		for product in recipe["products"]:
-			if product["item"] not in products:
-				products[product["item"]] = []
-			if product["item"] not in produced_in:
-				produced_in[product["item"]] = []
-			produced_in[product["item"]].append(recipe_name)
-		if only_in_machines and recipe["inMachine"] == False:
-			continue
-		for ingredient in recipe["ingredients"]:
-			resources[ingredient["item"]].append([ingredient["amount"] / recipe["time"] * 60, recipe["className"]])
-		for product in recipe["products"]:
-			products[product["item"]].append([product["amount"] / recipe["time"] * 60, recipe["className"]])
-	for resource_name in resources:
-		if len(resources[resource_name]) > 0:
-			text = " + ".join([str(1 / item[0]) + " * " + item[1] for item in resources[resource_name]])
-		else:
-			text = "0"
-		lp_solver.stdin.write((resource_name + " >= " + text + ";\n").encode("utf-8"))
-	for product_name in products:
-		if len(products[product_name]) > 0:
-			text = " + ".join([str(item[0]) + " * " + item[1] for item in products[product_name]])
-		else:
-			text = "0"
-		lp_solver.stdin.write((product_name + " <= " + text + ";\n").encode("utf-8"))
-		lp_solver.stdin.write((product_name + " >= " + "0" + ";\n").encode("utf-8"))
-	for item in target_items:
-		lp_solver.stdin.write((item + " >= " + str(target_items[item]) + ";\n").encode("utf-8"))
-	declarations = set(list(resources.keys()) + list(products.keys()) + list(obj["recipes"].keys()))
-	if only_in_machines:
-		for decl in declarations.copy():
-			if decl in obj["recipes"] and obj["recipes"][decl]["inMachine"] == False:
-				declarations.remove(decl)
-	#lp_solver.stdin.write(("int " + ", ".join(declarations) + ";\n").encode("utf-8"))
+		assert set(obj["resources"].keys()) == {*resource_scores, "Desc_Water_C"}
+		assert obj["resources"].keys() <= obj["items"].keys()
+		assert obj["buildings"].keys().isdisjoint(obj["items"].keys())
+	lp_solver = subprocess.Popen(["lp_solve"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+	stdin = lp_solver.stdin
+	stdin.write(f"min: {build_resource_score(obj, 1_000)} + {build_building_score(obj, 1)};\n")
+	stdin.write(build_resources())
+	stdin.write(build_recipes(obj))
+	stdin.write(build_target())
 	lp_solver.stdin.close()
 	lp_solver.wait()
-	output = lp_solver.stdout.read().decode("utf-8").split("\n")
+
+	output = lp_solver.stdout.read().split("\n")
 	if "Actual values of the variables:" not in output:
-		print("Error occured. Original output:")
-		print("\n".join(output))
-		return
-	result = []
+		sys.exit("Error occured. Original output:\n" + "\n".join(output))
+
+	resources = {}
+	recipes = {}
+	items = {}
+	buildings = {}
+	max_name_length = 8
 	for line in output[output.index("Actual values of the variables:")+1:-1]:
-		if not line.endswith(" 0"):
-			result.append(list(filter(None, line.split(" "))))
-	used_keys = set([item[0] for item in result])
-	for i in range(len(result)):
-		if result[i][0].startswith("Recipe_"):
-			if result[i][0] in obj["recipes"]:
-				result[i][1] = str(float(result[i][1]) * obj["recipes"][result[i][0]]["time"])
-				result[i].append("using")
-				ingredients = []
-				for ingredient in obj["recipes"][result[i][0]]["ingredients"]:
-					ingredients += [str(ingredient["amount"] * float(result[i][1])), ingredient["item"], "and"]
-				result[i] += ingredients[:-1]
-			else:
-				result[i][1] += " (unknown time)"
-		elif result[i][0].startswith("Desc_"):
-			if result[i][0] in produced_in:
-				result[i].append("produced in")
-				result[i] += [item for item in produced_in[result[i][0]] if item in used_keys]
-	print("\n".join([" ".join(line) for line in result]))
-	print("main items:")
-	print("\n".join([" ".join(line) for line in result if line[0].startswith("Recipe_SinkPoint_")]))
-	print("inputs:")
-	print("\n".join([" ".join(line) for line in result if line[0] in obj["resources"]]))
+		columns = list(filter(None, line.split(" ")))
+		assert len(columns) == 2
+		variable = columns[0]
+		value = float(columns[1])
+		if variable.startswith("itm#"):
+			assert variable[4:] in obj["items"]
+			if value != 0:
+				items[variable[4:]] = value
+			max_name_length = max(max_name_length, len(obj["items"][variable[4:]]["name"]))
+		elif variable.startswith("Recipe_") and value != 0:
+			assert variable in obj["recipes"], variable
+			building_name = obj["recipes"][variable]["producedIn"][0]
+			buildings.setdefault(building_name, 0)
+			buildings[building_name] += math.ceil(value)
+			max_name_length = max(max_name_length, len(obj["buildings"][building_name]["name"]))
+			recipes[variable] = value
+		elif variable.startswith("res#") and value != 0:
+			assert variable[4:] in obj["resources"]
+			resources[variable[4:]] = value
+		elif value != 0:
+			print("WARN: Unknown variable: " + variable, file=sys.stderr)
+
+	sorted_recipes = sort_recipes(recipes, obj)
+
+	print("Resources:\n")
+	for resource_name, value in resources.items():
+		assert resource_name in obj["resources"]
+		item = obj["items"][resource_name]
+		print(f"  {item['name']:{max_name_length}}  :  {value:13,.2f}")
+
+	print("\nFactories:\n")
+	for recipe_name, value in sorted_recipes.items():
+		recipe = obj["recipes"][recipe_name]
+		building = obj["buildings"][recipe["producedIn"][0]]
+		print(f"  {recipe['name']} ({math.ceil(value)} x)")
+		print(f"    Building {building['name']}")
+		print(f"    Input")
+		for ingredient in recipe["ingredients"]:
+			name = obj["items"][ingredient["item"]]["name"]
+			rate = 60 * ingredient["amount"] / recipe["time"]
+			print(f"      {name:{max_name_length}} {value * rate:13,.2f} (at most {math.floor(780 / rate):3} factories per belt)")
+		print(f"    Output")
+		for product in recipe["products"]:
+			name = obj["items"][product["item"]]["name"]
+			rate = 60 * product["amount"] / recipe["time"]
+			print(f"      {name:{max_name_length}} {value * rate:13,.2f} (at most {math.floor(780 / rate):3} factories per belt)")
+		print()
+
+	print("Buildings:\n")
+	for building_name, value in buildings.items():
+		assert building_name in obj["buildings"]
+		print(f"  {obj['buildings'][building_name]['name']:{max_name_length}}  :  {value:4}")
+
+	print("\nOverall Output:\n")
+	for item_name, value in items.items():
+		assert item_name in obj["items"]
+		item = obj["items"][item_name]
+		print(f"  {item['name']:{max_name_length}}  :  {value:13,.2f}")
+
+
+def build_resource_score(obj, multiplier):
+	avg = statistics.mean(resource_scores.values())
+	result = ""
+	for resource_name in obj["resources"]:
+		score = 0 if resource_name == "Desc_Water_C" else (avg / resource_scores[resource_name])
+		result += f"+{multiplier * score} res#{resource_name}"
+	return result
+
+
+def build_building_score(obj, multiplier):
+	building_score = ""
+	for recipe_name, recipe in obj["recipes"].items():
+		if only_in_machines and not recipe["inMachine"]:
+			continue  # Skip recipes which cannot be build in machines
+		assert len(recipe["producedIn"]) == 1, repr(recipe["producedIn"])
+		building = recipe["producedIn"][0]
+		assert building in obj["buildings"], building
+		assert building in building_scores, building
+		building_score += f"+{multiplier * building_scores[building]} {recipe_name}"
+	return building_score
+
+
+def build_resources():
+	result = "\n// resources\n"
+	for resource_name, limit in resource_scores.items():
+		result += f"res#{resource_name} <= {limit};\n"
+	return result
+
+
+def build_recipes(obj):
+	@dataclasses.dataclass(frozen=True)
+	class Recipe:
+		name: str
+		rate: float
+
+	def join(sep, recipes):
+		terms = []
+		for recipe in recipes:
+			terms.append(f"{sep}{recipe.rate} {recipe.name}")
+		return " ".join(terms) if terms else "0"
+
+	produced_by = {}
+	consumed_by = {}
+
+	for recipe_name, recipe in obj["recipes"].items():
+		if only_in_machines and not recipe["inMachine"]:
+			continue  # Skip recipes which cannot be build in machines
+		if recipe_name == "Recipe_SinkPoint_Desc_ResourceSinkCoupon_C":
+			continue  # Skip "broken" recipe
+		for product in recipe["products"]:
+			recipes = produced_by.setdefault(product["item"], list())
+			recipes.append(Recipe(recipe_name, 60 * product["amount"] / recipe["time"]))
+		for ingredient in recipe["ingredients"]:
+			recipes = consumed_by.setdefault(ingredient["item"], list())
+			recipes.append(Recipe(recipe_name, 60 * ingredient["amount"] / recipe["time"]))
+
+	result = "\n// items\n"
+	for item in consumed_by.keys() | produced_by.keys() | resource_scores.keys():
+		assert item in obj["items"]
+		assert item not in obj["buildings"]
+		production = join('+', produced_by.get(item, list()))
+		consumption = join('-', consumed_by.get(item, list()))
+		if item in resource_scores:
+			result += f"itm#{item} = res#{item} {production} {consumption};\n"
+		else:
+			result += f"itm#{item} = {production} {consumption};\n"
+
+	return result
+
+
+def build_target():
+	result = "\n// targets\n"
+	for item, amount in target_items.items():
+		result += f"itm#{item} >= {str(amount)};\n"
+	return result
+
+
+def sort_recipes(recipes, obj):
+	out = collections.OrderedDict()
+	seen = set()
+	recipes_by_product = {}
+	for recipe_name in recipes.keys():
+		for product in obj["recipes"][recipe_name]["products"]:
+			recipes_by_product.setdefault(product["item"], list()).append(recipe_name)
+
+	def add_recursively(recipe_name):
+		if recipe_name in seen:
+			return  # Avoid endless recursion
+		seen.add(recipe_name)
+		for ingredient in obj["recipes"][recipe_name]["ingredients"]:
+			for ingredient_recipe_name in recipes_by_product.get(ingredient["item"], []):
+				add_recursively(ingredient_recipe_name)
+		out[recipe_name] = recipes[recipe_name]
+
+	for recipe_name in recipes.keys():
+		add_recursively(recipe_name)
+	return out
+
 
 if __name__ == '__main__':
-	main(sys.argv)
+	main()
